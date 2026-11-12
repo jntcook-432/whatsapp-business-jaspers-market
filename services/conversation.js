@@ -86,6 +86,21 @@ async function markMessageForFollowUp(messageId) {
   await Cache.insert(messageId);
 }
 
+// WhatsApp retries webhooks, so the same inbound WAMID can arrive twice.
+// If the cache is unreachable we process anyway: a rare duplicate reply is
+// better than silently dropping a customer's message.
+async function claimInbound(messageId) {
+  if (!messageId) {
+    return true;
+  }
+  try {
+    return await Cache.claim(`inbound:${messageId}`);
+  } catch (err) {
+    console.error('Dedupe unavailable, processing message anyway:', err);
+    return true;
+  }
+}
+
 
 module.exports = class Conversation {
   constructor(phoneNumberId) {
@@ -93,62 +108,76 @@ module.exports = class Conversation {
   }
 
   static async handleMessage(senderPhoneNumberId, rawMessage) {
-    const message = new Message(rawMessage);
-    Attribution.logAttributionEvent(message, senderPhoneNumberId);
+    try {
+      const message = new Message(rawMessage);
+      Attribution.logAttributionEvent(message, senderPhoneNumberId);
 
-    switch (message.type) {
-      case constants.REPLY_INTERACTIVE_MEDIA_ID:
-        let interactiveMediaResponse = await sendInteractiveMediaMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(interactiveMediaResponse.messages[0].id);
-        break;
-      case constants.REPLY_MEDIA_CAROUSEL_ID:
-        let mediaCarouselResponse = await sendMediaCarouselMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(mediaCarouselResponse.messages[0].id);
-        break;
-      case constants.REPLY_OFFER_ID:
-        let ltoResponse = await sendLimitedTimeOfferMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(ltoResponse.messages[0].id);
-        break;
-      default:
-        sendTryOutDemoMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber,
-          constants.APP_DEFAULT_MESSAGE
-        );
-        break;
+      // Log every delivery (the README dedupes by WAMID in Insights), but
+      // only reply to the first delivery.
+      if (!(await claimInbound(message.id))) {
+        return;
+      }
+
+      switch (message.type) {
+        case constants.REPLY_INTERACTIVE_MEDIA_ID:
+          let interactiveMediaResponse = await sendInteractiveMediaMessage(
+            message.id,
+            senderPhoneNumberId,
+            message.senderPhoneNumber
+          );
+          await markMessageForFollowUp(interactiveMediaResponse.messages[0].id);
+          break;
+        case constants.REPLY_MEDIA_CAROUSEL_ID:
+          let mediaCarouselResponse = await sendMediaCarouselMessage(
+            message.id,
+            senderPhoneNumberId,
+            message.senderPhoneNumber
+          );
+          await markMessageForFollowUp(mediaCarouselResponse.messages[0].id);
+          break;
+        case constants.REPLY_OFFER_ID:
+          let ltoResponse = await sendLimitedTimeOfferMessage(
+            message.id,
+            senderPhoneNumberId,
+            message.senderPhoneNumber
+          );
+          await markMessageForFollowUp(ltoResponse.messages[0].id);
+          break;
+        default:
+          await sendTryOutDemoMessage(
+            message.id,
+            senderPhoneNumberId,
+            message.senderPhoneNumber,
+            constants.APP_DEFAULT_MESSAGE
+          );
+          break;
+      }
+    } catch (err) {
+      console.error('handleMessage failed:', err);
     }
   }
 
   static async handleStatus(senderPhoneNumberId, rawStatus) {
-    const status = new Status(rawStatus);
+    try {
+      const status = new Status(rawStatus);
 
-    // Only handle delivered and read statuses
-    if (!(status.status === 'delivered' || status.status === 'read')) {
-      return;
-    }
+      // Only handle delivered and read statuses
+      if (!(status.status === 'delivered' || status.status === 'read')) {
+        return;
+      }
 
-    // Only send a follow up message if the current message is flagged
-    // as needing one in the cache.
-    if (await Cache.remove(status.messageId)) {
-      await sendTryOutDemoMessage(
-        undefined,
-        senderPhoneNumberId,
-        status.recipientPhoneNumber,
-        constants.APP_TRY_ANOTHER_MESSAGE
-      );
+      // Only send a follow up message if the current message is flagged
+      // as needing one in the cache.
+      if (await Cache.remove(status.messageId)) {
+        await sendTryOutDemoMessage(
+          undefined,
+          senderPhoneNumberId,
+          status.recipientPhoneNumber,
+          constants.APP_TRY_ANOTHER_MESSAGE
+        );
+      }
+    } catch (err) {
+      console.error('handleStatus failed:', err);
     }
   }
 };

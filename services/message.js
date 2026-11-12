@@ -16,12 +16,14 @@ module.exports = class Message {
         ? rawMessage.text.body
         : null;
 
-    let type = rawMessage.type;
-    if (type === 'interactive') {
-      this.type = rawMessage.interactive.button_reply.id;
-    } else {
-      this.type = 'unknown'
-    }
+    // Only button replies route, since this bot only sends buttons. Other
+    // interactive payloads (list_reply, nfm_reply, ...) fall through to
+    // 'unknown' instead of throwing on a missing field.
+    const replyId = rawMessage.interactive?.button_reply?.id;
+    this.type =
+      rawMessage.type === 'interactive' && typeof replyId === 'string'
+        ? replyId
+        : 'unknown';
 
     this.senderPhoneNumber = rawMessage.from;
   }

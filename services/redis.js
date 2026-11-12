@@ -37,6 +37,15 @@ module.exports = class Cache {
         await client.expire(key, 15);
     }
 
+    /**
+     * Atomically claim a key for `ttlSeconds`. Returns true only for the
+     * first caller, which lets us drop duplicate webhook deliveries.
+     */
+    static async claim(key, ttlSeconds = 86400) {
+        const resp = await client.set(key, "1", { NX: true, EX: ttlSeconds });
+        return resp === "OK";
+    }
+
     static async remove(key) {
         let resp = await client.del(key);
 

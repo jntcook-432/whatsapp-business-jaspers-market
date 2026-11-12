@@ -7,15 +7,13 @@
 
 "use strict";
 
-const crypto = require('crypto');
-
 const { urlencoded, json } = require('body-parser');
 require('dotenv').config();
 const express = require('express');
 
 const config = require('./services/config');
 const Conversation = require('./services/conversation');
-const Message = require('./services/message');
+const { isValidSignature } = require('./services/inbound');
 const app = express();
 
 // Parse application/x-www-form-urlencoded
@@ -43,26 +41,30 @@ app.get("/webhook", function (req, res) {
 
 // Handle incoming messages
 app.post('/webhook', (req, res) => {
-  console.log(req.body);
+  // Do not log req.body: it contains customer phone numbers and message text.
 
   if (req.body.object === "whatsapp_business_account") {
-    req.body.entry.forEach(entry => {
-      entry.changes.forEach(change => {
+    (req.body.entry || []).forEach(entry => {
+      (entry.changes || []).forEach(change => {
         const value = change.value;
         if (value) {
           const senderPhoneNumberId = value.metadata.phone_number_id;
 
           if (value.statuses) {
             value.statuses.forEach(status => {
-              // Handle message status updates
-              Conversation.handleStatus(senderPhoneNumberId, status);
+              // Handle message status updates. Conversation methods catch
+              // their own errors; this is a second line of defence so one
+              // bad event can never terminate the process.
+              Conversation.handleStatus(senderPhoneNumberId, status)
+                .catch(err => console.error('handleStatus failed:', err));
             });
           }
 
           if (value.messages) {
             value.messages.forEach(rawMessage => {
               // Respond to message
-              Conversation.handleMessage(senderPhoneNumberId, rawMessage);
+              Conversation.handleMessage(senderPhoneNumberId, rawMessage)
+                .catch(err => console.error('handleMessage failed:', err));
             });
           }
         }
@@ -86,23 +88,22 @@ app.get('/', (req, res) => {
 // Check if all environment variables are set
 config.checkEnvVariables();
 
-// Verify that the callback came from Facebook.
+// Verify that the callback came from Facebook. Fails closed: requests without
+// a valid signature are rejected, and so is everything when APP_SECRET is unset.
 function verifyRequestSignature(req, res, buf) {
-  let signature = req.headers["x-hub-signature-256"];
-
-  if (!signature) {
-    console.warn(`Couldn't find "x-hub-signature-256" in headers.`);
-  } else {
-    let elements = signature.split("=");
-    let signatureHash = elements[1];
-    let expectedHash = crypto
-      .createHmac("sha256", config.appSecret)
-      .update(buf)
-      .digest("hex");
-    if (signatureHash != expectedHash) {
-      throw new Error("Couldn't validate the request signature.");
-    }
+  if (!config.appSecret) {
+    throw httpError(503, "APP_SECRET is not configured");
   }
+  if (!isValidSignature(buf, req.headers["x-hub-signature-256"], config.appSecret)) {
+    throw httpError(403, "Couldn't validate the request signature.");
+  }
+}
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  error.statusCode = status;
+  return error;
 }
 
 
